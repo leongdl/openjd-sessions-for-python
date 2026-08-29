@@ -44,7 +44,7 @@ from ._os_checker import is_posix, is_windows
 from ._path_mapping import PathMappingRule, to_host_path_separators
 from ._runner_base import (
     ScriptRunnerBase,
-    apply_let_bindings,
+    apply_script_let_bindings,
     resolve_action_arg_values,
     resolve_effective_cancelation,
     resolve_optional_int_field,
@@ -2017,6 +2017,7 @@ class Session(object):
         let_bindings: Optional[list[str]],
         embedded_files: Optional[Any],
         base: SymbolTable,
+        script: Any = None,
     ) -> SymbolTable:
         """Build the scope a wrapped action would have resolved against had
         it run unwrapped: a copy of ``base`` (the session-scope table) plus
@@ -2030,6 +2031,17 @@ class Session(object):
         never leak into the wrapped action's resolved command/args — and,
         symmetrically, the inner entity's lets never apply to the hook's own
         resolution scope. Mirrors openjd-rs's ``build_wrapped_inner_scope``.
+
+        ``script`` is the inner entity's script -- the model object
+        ``let_bindings`` came from -- forwarded so that a wrapped *step* script's
+        merged ``let`` list is split at its template-scope boundary exactly as
+        the step runner splits it (see
+        :func:`~._runner_base.apply_script_let_bindings`). Without it a wrapped
+        action would resolve against template-scope values re-rendered in the
+        host's path format, i.e. against a scope that differs from the one it
+        would have had unwrapped -- which is the whole property this method
+        exists to reproduce. An inner *environment* script has no such prefix and
+        is unaffected.
 
         Raises:
             ValueError (FormatStringError/ExpressionError): a binding or file
@@ -2046,10 +2058,10 @@ class Session(object):
             )
             records = file_writer.allocate_file_paths(embedded_files, symtab)
             if let_bindings:
-                apply_let_bindings(symtab=symtab, let_bindings=let_bindings)
+                apply_script_let_bindings(symtab=symtab, let_bindings=let_bindings, script=script)
             file_writer.write_file_contents(records, symtab)
         elif let_bindings:
-            apply_let_bindings(symtab=symtab, let_bindings=let_bindings)
+            apply_script_let_bindings(symtab=symtab, let_bindings=let_bindings, script=script)
         return symtab
 
     def _try_inject_wrapped_symbols(
@@ -2080,6 +2092,7 @@ class Session(object):
                 inner_script.let if inner_script is not None else None,
                 inner_script.embeddedFiles if inner_script is not None else None,
                 symtab,
+                inner_script,
             )
             inject(inner_symtab)
         except (FormatStringError, ValueError, RuntimeError) as e:
