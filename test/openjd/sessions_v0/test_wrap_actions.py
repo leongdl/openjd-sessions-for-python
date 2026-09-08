@@ -12,7 +12,6 @@ path. No containers required — ``echo`` and ``cat`` only.
 
 from __future__ import annotations
 
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -996,46 +995,46 @@ class TestTaskEmittedOpenjdEnv:
             assert not any("parse" in entry.lower() for entry in entries), entries
             assert not any(entry.startswith("no-equals-sign") for entry in entries), entries
 
-    def test_collect_session_env_list_tolerates_a_concurrent_writer(self) -> None:
+    def test_collect_session_env_list_reads_a_snapshot(self) -> None:
         # _action_callback writes _session_env_vars on the LoggingSubprocess
         # stdout thread, while _collect_session_env_list reads it on the caller's
-        # thread to build WrappedAction.Environment. Iterating the live dict
-        # raises "RuntimeError: dictionary keys changed during iteration"; before
-        # the reader took a snapshot this reproduced in 3 of 3 runs.
+        # thread to build WrappedAction.Environment. Iterating the live dict while
+        # that thread inserts raises "RuntimeError: dictionary keys changed during
+        # iteration", reproduced with real threads in 3 of 3 runs before the
+        # reader took a snapshot.
         #
-        # Drives the map directly rather than through real subprocess macros:
-        # the behaviour under test is the reader's iteration, and 20k real macros
-        # would be slow without stressing it any harder. Task-path writes are
-        # what made this reachable during a wrap hook, which is why it is pinned
-        # with the rest of that change.
+        # Two threads cannot pin that: whether the interleaving lands inside the
+        # iteration is up to the scheduler, and a first version of this test
+        # passed against a reader that did NOT snapshot. So the write is triggered
+        # from inside the read instead. A value that mutates the map while being
+        # rendered stands in for the IO thread, which makes the failure
+        # deterministic: iterating a snapshot tolerates it, iterating the live
+        # mapping raises on the next step. Two entries are needed so there IS a
+        # next step.
+        class _MutatesWhenRendered(str):
+            """A value that inserts into `target` while being formatted."""
+
+            target: dict[str, str]
+
+            def __format__(self, spec: str) -> str:
+                self.target[f"INSERTED_{len(self.target)}"] = "x"
+                return str.__format__(self, spec)
+
         with Session(session_id=uuid.uuid4().hex, job_parameter_values={}) as session:
-            errors: list[BaseException] = []
-            stop = threading.Event()
+            first = _MutatesWhenRendered("value-one")
+            first.target = session._session_env_vars
+            session._session_env_vars["TASKEMIT_FIRST"] = first
+            session._session_env_vars["TASKEMIT_SECOND"] = "value-two"
 
-            def writer() -> None:
-                for i in range(20000):
-                    if stop.is_set():
-                        return
-                    session._session_env_vars[f"TASKEMIT_RACE_{i}"] = "x"
-                    if i >= 50:
-                        session._session_env_vars.pop(f"TASKEMIT_RACE_{i - 50}", None)
+            entries = session._collect_session_env_list()
 
-            def reader() -> None:
-                try:
-                    while not stop.is_set():
-                        session._collect_session_env_list()
-                except BaseException as e:  # noqa: BLE001 - the failure being pinned
-                    errors.append(e)
-
-            threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
-            threads[1].start()
-            threads[0].start()
-            threads[0].join(timeout=20.0)
-            stop.set()
-            for t in threads:
-                t.join(timeout=20.0)
-
-            assert errors == [], f"{type(errors[0]).__name__}: {errors[0]}"
+            assert "TASKEMIT_FIRST=value-one" in entries, entries
+            assert "TASKEMIT_SECOND=value-two" in entries, entries
+            # The insert landed in the real map, so the read genuinely raced a
+            # write rather than the value being inert.
+            assert any(
+                name.startswith("INSERTED_") for name in session._session_env_vars
+            ), session._session_env_vars
 
     def test_task_emitted_redacted_env_is_listed_like_any_other_export(self) -> None:
         # openjd_redacted_env reaches _action_callback as an ENV message with a
