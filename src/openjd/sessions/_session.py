@@ -2436,11 +2436,25 @@ class Session(object):
                 # that action ran normally or via a wrap hook".
                 #
                 # Record it in the session-lifetime map only. _created_env_vars
-                # stays untouched, so no child process environment changes and a
-                # task behaves the same wrapped or unwrapped. openjd-rs holds the
-                # same split: its cumulative env_vars feeds the wrap symbols,
-                # while evaluate_env_vars builds process environments from
-                # created_env_vars alone, so a task macro never reaches one.
+                # stays untouched, so no process environment changes: an
+                # unwrapped task's environment is exactly what it was before this
+                # branch existed. openjd-rs holds the same split, its cumulative
+                # env_vars feeding the wrap symbols while evaluate_env_vars builds
+                # process environments from created_env_vars alone.
+                #
+                # This is NOT full wrapped/unwrapped equivalence, and the earlier
+                # comment here overclaimed it. The two views can disagree, in this
+                # direction: a task exporting a name an entered environment also
+                # declares wins here, so a wrap hook is handed the task's value
+                # while an unwrapped task's real environment keeps the
+                # environment's. test_task_export_does_not_displace_an_environments
+                # _value_in_a_child pins both halves. That also means a task's
+                # stdout chooses names and values a later wrapped task's hook is
+                # handed -- reachable only through a hook that forwards the symbol,
+                # but new for tasks, and matching what the released openjd-rs
+                # cumulative map already did. Filed upstream for a spec ruling
+                # alongside the redacted-value and unbounded-growth cases; it is
+                # one question, whether a task may write this symbol at all.
                 if cancel_action_mark_failed:
                     # Malformed macro: value is the parse error, not a variable.
                     # Keep discarding it, and keep not failing the action -- only
